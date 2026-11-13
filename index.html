@@ -34,7 +34,8 @@ input,textarea,select{font:inherit;color:inherit}
 
 /* hero */
 .hero{position:relative;height:calc(330px + var(--sat));overflow:hidden;color:#fff}
-.hero svg{position:absolute;left:0;top:0;width:100%;height:100%}
+.hero svg,.hero-cover{position:absolute;left:0;top:0;width:100%;height:100%}
+.hero-cover{background-color:#183D27;background-image:linear-gradient(90deg,rgba(9,31,18,.68) 0%,rgba(12,41,24,.40) 42%,rgba(12,41,24,.04) 72%),linear-gradient(0deg,rgba(243,245,240,.74) 0%,rgba(243,245,240,0) 28%),url("tennis-cover.png");background-size:cover;background-position:center 55%;}
 .hero .script{position:absolute;left:22px;top:calc(16px + var(--sat));font-family:"Snell Roundhand","Great Vibes","Brush Script MT",cursive;font-size:32px;line-height:34px;font-weight:700;text-shadow:0 2px 6px rgba(0,0,0,.25)}
 .hero .script span{display:block}.hero .script span:nth-child(2){padding-left:18px}
 .hero .motto{position:absolute;right:18px;top:calc(26px + var(--sat));text-align:right;font-size:15px;line-height:26px;letter-spacing:2px;text-shadow:0 1px 4px rgba(0,0,0,.3)}
@@ -330,19 +331,7 @@ function curMonth(){var d=new Date();return d.getFullYear()+'-'+pad(d.getMonth()
 function shiftMonth(m,k){var a=m.split('-');var d=new Date(+a[0],+a[1]-1+k,1);return d.getFullYear()+'-'+pad(d.getMonth()+1);}
 
 /* ---------- home ---------- */
-var HERO='<svg viewBox="0 0 390 330" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><defs>'+
-'<linearGradient id="hg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1A3E25"/><stop offset="1" stop-color="#2E6A3F"/></linearGradient>'+
-'<radialGradient id="hb" cx="38%" cy="32%" r="72%"><stop offset="0" stop-color="#F4FF8A"/><stop offset=".55" stop-color="#CBE33A"/><stop offset="1" stop-color="#7D9813"/></radialGradient>'+
-'<pattern id="hs" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(-14)"><path d="M0 0H8M0 0V8" stroke="#E4E8DA" stroke-width="1" fill="none" opacity=".75"/></pattern>'+
-'<filter id="hn" x="0" y="0" width="100%" height="100%"><feTurbulence type="fractalNoise" baseFrequency="1.1" numOctaves="2" seed="4"/><feColorMatrix values="0 0 0 0 .08  0 0 0 0 .22  0 0 0 0 .12  0 0 0 .55 0"/></filter>'+
-'<filter id="fz"><feTurbulence type="fractalNoise" baseFrequency="2.2" numOctaves="1" seed="2"/><feColorMatrix values="0 0 0 0 1  0 0 0 0 1  0 0 0 0 .8  0 0 0 .22 0"/><feComposite in2="SourceGraphic" operator="in"/></filter>'+
-'<linearGradient id="hf" x1="0" y1="0" x2="0" y2="1"><stop offset=".6" stop-color="#F3F5F0" stop-opacity="0"/><stop offset="1" stop-color="#F3F5F0"/></linearGradient>'+
-'</defs><rect width="390" height="330" fill="url(#hg)"/><rect width="390" height="330" filter="url(#hn)"/>'+
-'<path d="M-20 268 L420 214" stroke="#fff" stroke-width="4" opacity=".5"/><path d="M150 330 L250 110" stroke="#fff" stroke-width="3" opacity=".3"/>'+
-'<g transform="rotate(-14 318 110)"><ellipse cx="318" cy="110" rx="96" ry="60" fill="url(#hs)"/><ellipse cx="318" cy="110" rx="96" ry="60" fill="none" stroke="#151915" stroke-width="11"/><rect x="410" y="102" width="70" height="16" rx="6" fill="#151915"/><rect x="426" y="102" width="12" height="16" fill="#CBE33A"/></g>'+
-'<ellipse cx="308" cy="284" rx="70" ry="12" fill="#0E2414" opacity=".45"/><circle cx="308" cy="212" r="72" fill="url(#hb)"/><circle cx="308" cy="212" r="72" fill="#fff" filter="url(#fz)"/>'+
-'<path d="M248 172 C284 196 284 236 252 258" stroke="#fff" stroke-width="6" fill="none" opacity=".92" stroke-linecap="round"/><path d="M368 168 C334 192 334 236 366 258" stroke="#fff" stroke-width="6" fill="none" opacity=".92" stroke-linecap="round"/>'+
-'<rect width="390" height="330" fill="url(#hf)"/></svg>';
+var HERO='<div class="hero-cover" aria-hidden="true"></div>';
 
 function monthAgg(list,m){var o={count:0,hours:0,cost:0};list.forEach(function(r){if(r.date.slice(0,7)===m){o.count++;o.hours+=num(r.hours,0);o.cost+=cost(r);}});return o;}
 

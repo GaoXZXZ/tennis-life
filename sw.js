@@ -1,10 +1,11 @@
 /* 网球生活：静态资源离线缓存 */
-var CACHE_NAME = 'tennis-life-v2';
+var CACHE_NAME = 'tennis-life-v3';
 var APP_SHELL = [
   './',
   './index.html',
   './manifest.webmanifest',
-  './icon.svg'
+  './icon.svg',
+  './tennis-cover.png'
 ];
 
 self.addEventListener('install', function (event) {
