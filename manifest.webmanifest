@@ -1,0 +1,20 @@
+{
+  "name": "我的网球生活",
+  "short_name": "网球生活",
+  "description": "记录每一场网球生活：场次、时长、花费和成长。",
+  "lang": "zh-CN",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F3F5F0",
+  "theme_color": "#1D4429",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
