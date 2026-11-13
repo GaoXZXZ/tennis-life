@@ -461,6 +461,7 @@ function renderMine(){
   var s=db.settings,b=s.baseline,all=sumOf(db.records);
   var sd=startDate();var days=sd?Math.max(0,dayDiff(sd,today())+1):0;
   var nm=s.name||'网球人';
+  var gh=githubSync();
   var h='<div class="me"><div class="av">'+esc(nm.slice(0,1))+'</div><div><b>'+esc(nm)+'</b><small>网球第 '+days+' 天 · '+fmt(all.count+b.count,0)+' 场</small></div></div>';
   function row(act,t,v,cls){return '<button data-act="'+act+'"'+(cls?' class="'+cls+'"':'')+'><span>'+t+'</span><span>'+v+ico('right','#A9B3AB',14)+'</span></button>';}
   h+='<div class="mg"><div class="flabel">设置</div><div class="list">'+
@@ -474,9 +475,12 @@ function renderMine(){
     row('setBase','补录历史累计',b.count||b.hours||b.cost?('已补 '+fmt(b.count,0)+' 场'):'未补录')+
     '</div><div class="foot">用这个软件之前打过的总场次、时长、花费，会加到首页和数据页的“累计”里。</div></div>';
   h+='<div class="mg"><div class="flabel">数据</div><div class="list">'+
+    row('githubSetup','GitHub 私密备份',gh.repo?'已配置':'未设置')+
+    row('githubUpload','上传加密备份',gh.repo?'现在上传':'先设置')+
+    row('githubRestore','恢复加密备份',gh.repo?'从 GitHub 恢复':'先设置')+
     row('export','导出备份','JSON')+row('import','导入备份','')+row('csv','导出表格','CSV')+
     '<button data-act="clear"><span class="danger">清空所有数据</span><span></span></button>'+
-    '</div><div class="foot">数据只存在这台手机的浏览器里（共 '+db.records.length+' 条记录）。换手机、清理 Safari 数据前，记得先导出备份。</div></div>';
+    '</div><div class="foot">GitHub 备份会先在本机加密，再写进你的私有仓库。令牌只保留到关闭 App，密码不保存也不会上传。另建议保留一份本地 JSON 备份。</div></div>';
   document.getElementById('v-mine').innerHTML=h;
 }
 
@@ -680,6 +684,121 @@ function exportCSV(){
   var csv=[head].concat(rows).map(function(row){return row.map(function(x){x=String(x==null?'':x);return /[",\n]/.test(x)?'"'+x.replace(/"/g,'""')+'"':x;}).join(',');}).join('\r\n');
   shareFile('网球记录-'+today()+'.csv','﻿'+csv,'text/csv');
 }
+
+/* ---------- encrypted GitHub backup ---------- */
+var GITHUB_SYNC_KEY='tennis-life-github-sync-v1';
+var GITHUB_TOKEN_KEY='tennis-life-github-token-v1';
+var GITHUB_BACKUP_FILE='tennis-life-backup.enc.json';
+var GITHUB_API='https://api.github.com';
+var GITHUB_KDF_ITERATIONS=300000;
+
+function githubSync(){
+  try{
+    var s=JSON.parse(localStorage.getItem(GITHUB_SYNC_KEY)||'{}');
+    return s&&validGithubRepo(s.repo)?{repo:s.repo,file:GITHUB_BACKUP_FILE}:{};
+  }catch(e){return {};}
+}
+function validGithubRepo(repo){return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(String(repo||'').trim());}
+function saveGithubSync(repo){localStorage.setItem(GITHUB_SYNC_KEY,JSON.stringify({repo:repo,file:GITHUB_BACKUP_FILE}));}
+function githubToken(){try{return sessionStorage.getItem(GITHUB_TOKEN_KEY)||'';}catch(e){return '';}}
+function saveGithubToken(token){try{sessionStorage.setItem(GITHUB_TOKEN_KEY,token);}catch(e){}}
+function githubApiUrl(repo){return GITHUB_API+'/repos/'+repo.split('/').map(encodeURIComponent).join('/')+'/contents/'+encodeURIComponent(GITHUB_BACKUP_FILE);}
+function b64Bytes(bytes){
+  var str='',i=0,step=0x8000;
+  for(;i<bytes.length;i+=step)str+=String.fromCharCode.apply(null,bytes.subarray(i,Math.min(i+step,bytes.length)));
+  return btoa(str);
+}
+function unb64Bytes(base64){
+  var str=atob(String(base64||'').replace(/\s/g,'')),out=new Uint8Array(str.length);
+  for(var i=0;i<str.length;i++)out[i]=str.charCodeAt(i);
+  return out;
+}
+function backupPayload(){return {app:'tennis-life',version:1,exportedAt:new Date().toISOString(),records:db.records,settings:db.settings};}
+async function encryptionKey(password,salt,usage){
+  var material=await crypto.subtle.importKey('raw',new TextEncoder().encode(password),'PBKDF2',false,['deriveKey']);
+  return crypto.subtle.deriveKey({name:'PBKDF2',salt:salt,iterations:GITHUB_KDF_ITERATIONS,hash:'SHA-256'},material,{name:'AES-GCM',length:256},false,[usage]);
+}
+async function encryptBackup(password){
+  if(!window.crypto||!crypto.subtle)throw new Error('此浏览器不支持安全加密，请使用最新版 Safari');
+  var salt=crypto.getRandomValues(new Uint8Array(16)),iv=crypto.getRandomValues(new Uint8Array(12));
+  var key=await encryptionKey(password,salt,'encrypt');
+  var cipher=await crypto.subtle.encrypt({name:'AES-GCM',iv:iv},key,new TextEncoder().encode(JSON.stringify(backupPayload())));
+  return JSON.stringify({app:'tennis-life-encrypted-backup',version:1,algorithm:'AES-GCM',kdf:'PBKDF2-SHA-256',iterations:GITHUB_KDF_ITERATIONS,salt:b64Bytes(salt),iv:b64Bytes(iv),ciphertext:b64Bytes(new Uint8Array(cipher)),exportedAt:new Date().toISOString()},null,2);
+}
+async function decryptBackup(text,password){
+  var packed=JSON.parse(text);
+  if(!packed||packed.app!=='tennis-life-encrypted-backup'||packed.version!==1||!packed.salt||!packed.iv||!packed.ciphertext)throw new Error('GitHub 中的文件不是本应用的加密备份');
+  var salt=unb64Bytes(packed.salt),iv=unb64Bytes(packed.iv),cipher=unb64Bytes(packed.ciphertext);
+  var material=await crypto.subtle.importKey('raw',new TextEncoder().encode(password),'PBKDF2',false,['deriveKey']);
+  var key=await crypto.subtle.deriveKey({name:'PBKDF2',salt:salt,iterations:+packed.iterations||GITHUB_KDF_ITERATIONS,hash:'SHA-256'},material,{name:'AES-GCM',length:256},false,['decrypt']);
+  try{
+    var raw=await crypto.subtle.decrypt({name:'AES-GCM',iv:iv},key,cipher);
+    var data=JSON.parse(new TextDecoder().decode(raw));
+    if(!data||!Array.isArray(data.records))throw new Error('备份内容无效');
+    return data;
+  }catch(e){throw new Error(e&&e.message==='备份内容无效'?'备份内容无效':'备份密码不正确或文件已损坏');}
+}
+async function githubFetch(url,token,options){
+  var opts=options||{};
+  opts.headers=Object.assign({'Accept':'application/vnd.github+json','Authorization':'Bearer '+token,'X-GitHub-Api-Version':'2022-11-28'},opts.headers||{});
+  var res=await fetch(url,opts);
+  if(!res.ok){
+    var msg='GitHub 请求失败（'+res.status+'）';
+    try{var body=await res.json();if(body&&body.message)msg=body.message;}catch(e){}
+    var err=new Error(msg);err.status=res.status;throw err;
+  }
+  return res;
+}
+function githubSetup(){
+  var old=githubSync();
+  formSheet('设置 GitHub 私密备份','先在 GitHub 创建一个“私有”仓库。令牌仅保留到关闭 App。',[
+    {k:'repo',l:'私有仓库',v:old.repo||'GaoXZXZ/tennis-life-data',ph:'用户名/仓库名'},
+    {k:'token',l:'访问令牌',t:'password',ph:'仅本次会话使用'}
+  ],function(o){
+    var repo=o.repo.replace(/^https:\/\/github\.com\//,'').replace(/\.git$/,'').trim();
+    if(!validGithubRepo(repo)){toast('仓库格式应为 用户名/仓库名');return false;}
+    if(!o.token){toast('请输入 GitHub 访问令牌');return false;}
+    saveGithubSync(repo);saveGithubToken(o.token);renderMine();toast('私密备份已设置');
+  });
+}
+function requireGithubSync(){
+  var sync=githubSync();
+  if(!sync.repo||!githubToken()){githubSetup();return null;}
+  return sync;
+}
+function githubUpload(){
+  var sync=requireGithubSync();if(!sync)return;
+  formSheet('上传加密备份','输入一个至少 8 位的备份密码。它不会保存，也不会发送到 GitHub。',[{k:'password',l:'备份密码',t:'password',ph:'务必自己记住'}],function(o){
+    if(o.password.length<8){toast('备份密码至少 8 位');return false;}
+    uploadGithubBackup(sync,o.password);
+  });
+}
+async function uploadGithubBackup(sync,password){
+  try{
+    toast('正在本机加密…');
+    var encrypted=await encryptBackup(password),url=githubApiUrl(sync.repo),sha='';
+    try{var old=await githubFetch(url,githubToken());sha=(await old.json()).sha||'';}catch(e){if(e.status!==404)throw e;}
+    await githubFetch(url,githubToken(),{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:'Update encrypted tennis backup',content:b64Bytes(new TextEncoder().encode(encrypted)),sha:sha||undefined})});
+    toast('已上传加密备份');
+  }catch(e){toast('上传失败：'+(e&&e.message||'请检查网络、仓库和令牌'));}
+}
+function githubRestore(){
+  var sync=requireGithubSync();if(!sync)return;
+  formSheet('从 GitHub 恢复','输入上传时使用的备份密码。恢复会替换这台设备的现有数据。',[{k:'password',l:'备份密码',t:'password',ph:'上传时设置的密码'}],function(o){
+    if(!o.password){toast('请输入备份密码');return false;}
+    restoreGithubBackup(sync,o.password);
+  });
+}
+async function restoreGithubBackup(sync,password){
+  try{
+    toast('正在下载并解密…');
+    var res=await githubFetch(githubApiUrl(sync.repo),githubToken());
+    var file=await res.json(),data=await decryptBackup(new TextDecoder().decode(unb64Bytes(file.content)),password);
+    confirmSheet('确认恢复','备份里有 '+data.records.length+' 条记录。恢复后会替换本机的 '+db.records.length+' 条记录和设置。','恢复',false,function(){
+      db=norm(data);db.records.forEach(function(r){if(!r.id)r.id=uid();});save();renderAll();toast('已恢复 '+db.records.length+' 条记录');
+    });
+  }catch(e){toast('恢复失败：'+(e&&e.message||'请检查网络、仓库、令牌和密码'));}
+}
 $('file').addEventListener('change',function(e){
   var f=e.target.files[0];e.target.value='';if(!f)return;
   var rd=new FileReader();
@@ -726,6 +845,9 @@ var ACT={
   setBase:function(){var b=db.settings.baseline;formSheet('补录历史累计','用这个软件之前打过的总数，会加到“累计”里',[
     {k:'c',l:'场次',im:'numeric',v:b.count||'',u:'场',ph:'0'},{k:'h',l:'时长',im:'decimal',v:b.hours||'',u:'小时',ph:'0'},{k:'m',l:'花费',im:'decimal',v:b.cost||'',u:'元',ph:'0'}],
     function(o){db.settings.baseline={count:Math.max(0,Math.round(num(o.c,0))),hours:Math.max(0,num(o.h,0)),cost:Math.max(0,num(o.m,0))};save();renderAll();toast('已保存');});},
+  githubSetup:githubSetup,
+  githubUpload:githubUpload,
+  githubRestore:githubRestore,
   export:exportJSON,
   csv:function(){if(!db.records.length){toast('还没有记录');return;}exportCSV();},
   import:function(){$('file').click();},

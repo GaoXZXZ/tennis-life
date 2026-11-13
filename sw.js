@@ -1,5 +1,5 @@
 /* 网球生活：静态资源离线缓存 */
-var CACHE_NAME = 'tennis-life-v1';
+var CACHE_NAME = 'tennis-life-v2';
 var APP_SHELL = [
   './',
   './index.html',
