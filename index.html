@@ -818,6 +818,15 @@ function markGithubAutoDirty(){var meta=githubAutoMeta();meta.updatedAt=githubAu
 function markGithubAutoRecord(id){var meta=githubAutoMeta();delete meta.deleted[id];meta.updatedAt=githubAutoNow();saveGithubAutoMeta(meta);}
 function markGithubAutoDeleted(id){var meta=githubAutoMeta();meta.deleted[id]=githubAutoNow();meta.updatedAt=githubAutoNow();saveGithubAutoMeta(meta);}
 function githubAutoInfo(){var c=githubAutoConfig(),t=githubAutoToken();return {ready:!!(c&&t),syncing:githubAutoBusy};}
+function migrateGithubAutoConfig(){
+  if(githubAutoInfo().ready)return;
+  var manual=githubSync(),token=githubToken();
+  if(manual.repo&&token){
+    localStorage.setItem(GITHUB_AUTO_CONFIG_KEY,JSON.stringify({repo:manual.repo}));
+    localStorage.setItem(GITHUB_AUTO_TOKEN_KEY,token);
+    markGithubAutoDirty();
+  }
+}
 function githubAutoApiUrl(repo){return GITHUB_API+'/repos/'+repo.split('/').map(encodeURIComponent).join('/')+'/contents/'+encodeURIComponent(GITHUB_AUTO_FILE);}
 function githubAutoPayload(data,updatedAt){return {app:'tennis-life-sync',version:1,updatedAt:updatedAt||githubAutoNow(),records:data.records,settings:data.settings};}
 function githubAutoIsNewer(a,b){var aa=Date.parse(a||0),bb=Date.parse(b||0);return isFinite(aa)&&(!isFinite(bb)||aa>bb);}
@@ -1153,6 +1162,7 @@ document.addEventListener('click',function(e){var el=e.target.closest('[data-act
 document.addEventListener('keydown',function(e){if(e.key==='Enter'&&e.target.id==='f-newp'){e.preventDefault();ACT.addPartner();}});
 
 function renderAll(){renderHome();renderRecords();renderMine();if($('p-stats').classList.contains('on'))renderStats();}
+migrateGithubAutoConfig();
 renderAll();
 startGithubAutoSync();
 
