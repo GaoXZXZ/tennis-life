@@ -291,11 +291,9 @@ function norm(d){
 function num(v,def){v=parseFloat(v);return isFinite(v)?v:def;}
 function load(){try{var raw=localStorage.getItem(KEY);if(raw)return norm(JSON.parse(raw));}catch(e){}return norm({});}
 var db=load();
-function save(options){
-  options=options||{};
+function save(){
   try{localStorage.setItem(KEY,JSON.stringify(db));}catch(e){toast('保存失败：浏览器存储不可用');}
-  if(options.touchSettings!==false)cloudTouchSettings();
-  if(!options.noCloud)scheduleCloudSync();
+  markGithubAutoDirty();scheduleGithubAutoSync();
 }
 
 /* ---------- helpers ---------- */
@@ -456,7 +454,7 @@ function renderMine(){
   var sd=startDate();var days=sd?Math.max(0,dayDiff(sd,today())+1):0;
   var nm=s.name||'网球人';
   var gh=githubSync();
-  var cloud=cloudInfo();
+  var githubAuto=githubAutoInfo();
   var h='<div class="me"><div class="av">'+esc(nm.slice(0,1))+'</div><div><b>'+esc(nm)+'</b><small>网球第 '+days+' 天 · '+fmt(all.count+b.count,0)+' 场</small></div></div>';
   function row(act,t,v,cls){return '<button data-act="'+act+'"'+(cls?' class="'+cls+'"':'')+'><span>'+t+'</span><span>'+v+ico('right','#A9B3AB',14)+'</span></button>';}
   h+='<div class="mg"><div class="flabel">设置</div><div class="list">'+
@@ -469,15 +467,13 @@ function renderMine(){
   h+='<div class="mg"><div class="flabel">历史数据</div><div class="list">'+
     row('setBase','补录历史累计',b.count||b.hours||b.cost?('已补 '+fmt(b.count,0)+' 场'):'未补录')+
     '</div><div class="foot">用这个软件之前打过的总场次、时长、花费，会加到首页和数据页的“累计”里。</div></div>';
-  h+='<div class="mg"><div class="flabel">云同步</div><div class="list">'+
-    row('cloudSetup','连接云数据库',cloud.configured?'已配置':'未设置')+
-    row('cloudLogin','同步账号',cloud.signedIn?'已登录':'登录 / 注册')+
-    (cloud.configured&&!cloud.signedIn?row('cloudRegister','创建同步账号','首次使用'): '')+
-    row('cloudSyncNow','立即同步',cloud.syncing?'同步中…':(cloud.signedIn?'自动同步已开启':'需先登录'))+
-    (cloud.signedIn?row('cloudLogout','退出当前设备',''): '')+
-    '</div><div class="foot">登录后每次打开 App 会自动连接云端并同步。数据按账号隔离，其他账号无法读取。</div></div>';
+  h+='<div class="mg"><div class="flabel">自动同步</div><div class="list">'+
+    row('githubAutoSetup','GitHub 私有同步',githubAuto.ready?'已开启':'未设置')+
+    row('githubAutoNow','立即同步',githubAuto.syncing?'同步中…':(githubAuto.ready?'自动同步已开启':'需先设置'))+
+    (githubAuto.ready?row('githubAutoDisconnect','断开此设备',''): '')+
+    '</div><div class="foot">首次设置后，每次打开 App 都会自动与 GitHub 私有仓库同步。令牌只保存在这台设备，并且只允许读写该私有仓库。</div></div>';
   h+='<div class="mg"><div class="flabel">数据</div><div class="list">'+
-    row('githubSetup','GitHub 私密备份',gh.repo?'已配置':'未设置')+
+    row('githubSetup','手动加密备份',gh.repo?'已配置':'未设置')+
     row('githubUpload','上传加密备份',gh.repo?'现在上传':'先设置')+
     row('githubRestore','恢复加密备份',gh.repo?'从 GitHub 恢复':'先设置')+
     row('export','导出备份','JSON')+row('import','导入备份','')+row('csv','导出表格','CSV')+
@@ -646,10 +642,10 @@ function saveEdit(){
     partners:ed.partners.slice(),score:$('f-score').value.trim(),
     costs:{court:num($('f-court').value,0),coach:num($('f-coach').value,0),other:num($('f-other').value,0)},
     kcal:kc===''?null:num(kc,null),mood:ed.mood||0,note:$('f-note').value.trim()};
-  r.updatedAt=cloudNow();
+  r.updatedAt=githubAutoNow();
   var i=-1;db.records.forEach(function(x,j){if(x.id===r.id)i=j;});
   if(i>=0)db.records[i]=r;else db.records.push(r);
-  markCloudRecord(r.id);save({touchSettings:false});closePage('p-edit');renderAll();toast(i>=0?'已更新':'已记下，又是更好的自己');
+  markGithubAutoRecord(r.id);save();closePage('p-edit');renderAll();toast(i>=0?'已更新':'已记下，又是更好的自己');
 }
 
 /* ---------- pages / sheets ---------- */
@@ -798,10 +794,94 @@ async function restoreGithubBackup(sync,password){
     var res=await githubFetch(githubApiUrl(sync.repo),githubToken());
     var file=await res.json(),data=await decryptBackup(new TextDecoder().decode(unb64Bytes(file.content)),password);
     confirmSheet('确认恢复','备份里有 '+data.records.length+' 条记录。恢复后会替换本机的 '+db.records.length+' 条记录和设置。','恢复',false,function(){
-      db=norm(data);db.records.forEach(function(r){if(!r.id)r.id=uid();markCloudRecord(r.id);});save();renderAll();toast('已恢复 '+db.records.length+' 条记录');
+      db=norm(data);db.records.forEach(function(r){if(!r.id)r.id=uid();markGithubAutoRecord(r.id);});save();renderAll();toast('已恢复 '+db.records.length+' 条记录');
     });
   }catch(e){toast('恢复失败：'+(e&&e.message||'请检查网络、仓库、令牌和密码'));}
 }
+
+/* ---------- automatic GitHub private sync ---------- */
+var GITHUB_AUTO_CONFIG_KEY='tennis-life-github-auto-v1';
+var GITHUB_AUTO_TOKEN_KEY='tennis-life-github-auto-token-v1';
+var GITHUB_AUTO_META_KEY='tennis-life-github-auto-meta-v1';
+var GITHUB_AUTO_FILE='tennis-life-sync.json';
+var githubAutoBusy=false,githubAutoTimer=null;
+function githubAutoNow(){return new Date().toISOString();}
+function githubAutoConfig(){
+  try{var c=JSON.parse(localStorage.getItem(GITHUB_AUTO_CONFIG_KEY)||'{}');return validGithubRepo(c.repo)?{repo:c.repo}:null;}catch(e){return null;}
+}
+function githubAutoToken(){try{return localStorage.getItem(GITHUB_AUTO_TOKEN_KEY)||'';}catch(e){return '';}}
+function githubAutoMeta(){
+  try{var m=JSON.parse(localStorage.getItem(GITHUB_AUTO_META_KEY)||'{}');return {updatedAt:m&&m.updatedAt||'',lastSyncAt:m&&m.lastSyncAt||'',deleted:m&&m.deleted&&typeof m.deleted==='object'?m.deleted:{}};}catch(e){return {updatedAt:'',lastSyncAt:'',deleted:{}};}
+}
+function saveGithubAutoMeta(meta){try{localStorage.setItem(GITHUB_AUTO_META_KEY,JSON.stringify(meta));}catch(e){}}
+function markGithubAutoDirty(){var meta=githubAutoMeta();meta.updatedAt=githubAutoNow();saveGithubAutoMeta(meta);}
+function markGithubAutoRecord(id){var meta=githubAutoMeta();delete meta.deleted[id];meta.updatedAt=githubAutoNow();saveGithubAutoMeta(meta);}
+function markGithubAutoDeleted(id){var meta=githubAutoMeta();meta.deleted[id]=githubAutoNow();meta.updatedAt=githubAutoNow();saveGithubAutoMeta(meta);}
+function githubAutoInfo(){var c=githubAutoConfig(),t=githubAutoToken();return {ready:!!(c&&t),syncing:githubAutoBusy};}
+function githubAutoApiUrl(repo){return GITHUB_API+'/repos/'+repo.split('/').map(encodeURIComponent).join('/')+'/contents/'+encodeURIComponent(GITHUB_AUTO_FILE);}
+function githubAutoPayload(data,updatedAt){return {app:'tennis-life-sync',version:1,updatedAt:updatedAt||githubAutoNow(),records:data.records,settings:data.settings};}
+function githubAutoIsNewer(a,b){var aa=Date.parse(a||0),bb=Date.parse(b||0);return isFinite(aa)&&(!isFinite(bb)||aa>bb);}
+function githubAutoRecordIndex(list,id){for(var i=0;i<list.length;i++)if(list[i].id===id)return i;return -1;}
+function githubAutoSame(a,b){return JSON.stringify({records:a.records,settings:a.settings})===JSON.stringify({records:b.records,settings:b.settings});}
+function githubAutoMerge(remote,local,meta){
+  var base=norm(remote),here=norm(local),merged={records:base.records.slice(),settings:meta.updatedAt?here.settings:base.settings};
+  here.records.forEach(function(record){
+    var i=githubAutoRecordIndex(merged.records,record.id);
+    if(i<0)merged.records.push(record);
+    else if(githubAutoIsNewer(record.updatedAt,merged.records[i].updatedAt))merged.records[i]=record;
+  });
+  Object.keys(meta.deleted).forEach(function(id){
+    var i=githubAutoRecordIndex(merged.records,id);
+    if(i>=0&&githubAutoIsNewer(meta.deleted[id],merged.records[i].updatedAt))merged.records.splice(i,1);
+  });
+  return norm(merged);
+}
+async function githubAutoRead(config,token){
+  try{
+    var response=await githubFetch(githubAutoApiUrl(config.repo),token),file=await response.json();
+    var data=JSON.parse(new TextDecoder().decode(unb64Bytes(file.content)));
+    if(!data||data.app!=='tennis-life-sync'||!Array.isArray(data.records))throw new Error('私有仓库中的同步文件无效');
+    return {data:norm(data),sha:file.sha,updatedAt:data.updatedAt||''};
+  }catch(e){if(e&&e.status===404)return null;throw e;}
+}
+async function githubAutoWrite(config,token,data,sha,updatedAt){
+  var payload=githubAutoPayload(data,updatedAt),encoded=b64Bytes(new TextEncoder().encode(JSON.stringify(payload)));
+  await githubFetch(githubAutoApiUrl(config.repo),token,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:'Sync tennis life data',content:encoded,sha:sha||undefined})});
+  return payload;
+}
+function githubAutoSetup(){
+  var auto=githubAutoConfig(),manual=githubSync();
+  formSheet('GitHub 自动同步','请选择你创建的私有仓库。令牌会保存在这台设备，供 App 打开时自动同步。',[{k:'repo',l:'私有仓库',v:auto?auto.repo:(manual.repo||'GaoXZXZ/tennis-life-data'),ph:'用户名/仓库名'},{k:'token',l:'细粒度令牌',t:'password',ph:'只授予 Contents 读写权限'}],function(o){
+    var repo=o.repo.replace(/^https:\/\/github\.com\//,'').replace(/\.git$/,'').trim();
+    if(!validGithubRepo(repo)){toast('仓库格式应为 用户名/仓库名');return false;}
+    if(!o.token){toast('请输入细粒度令牌');return false;}
+    localStorage.setItem(GITHUB_AUTO_CONFIG_KEY,JSON.stringify({repo:repo}));localStorage.setItem(GITHUB_AUTO_TOKEN_KEY,o.token);markGithubAutoDirty();renderMine();toast('自动同步已开启');githubAutoSync(false);
+  });
+}
+function githubAutoDisconnect(){localStorage.removeItem(GITHUB_AUTO_CONFIG_KEY);localStorage.removeItem(GITHUB_AUTO_TOKEN_KEY);renderMine();toast('已断开当前设备');}
+function githubAutoNowSync(){if(!githubAutoInfo().ready){githubAutoSetup();return;}githubAutoSync(false);}
+async function githubAutoSync(silent){
+  if(githubAutoBusy)return;
+  var config=githubAutoConfig(),token=githubAutoToken();
+  if(!config||!token){if(!silent)toast('请先设置 GitHub 自动同步');return;}
+  if(navigator.onLine===false){if(!silent)toast('当前离线，稍后会自动同步');return;}
+  githubAutoBusy=true;if(ui.tab==='mine')renderMine();
+  try{
+    var meta=githubAutoMeta(),remote=await githubAutoRead(config,token),merged,updatedAt;
+    if(!remote){updatedAt=meta.updatedAt||githubAutoNow();await githubAutoWrite(config,token,db,'',updatedAt);}
+    else{
+      merged=githubAutoMerge(remote.data,db,meta);
+      if(!githubAutoSame(merged,remote.data)||githubAutoIsNewer(meta.updatedAt,remote.updatedAt)){
+        updatedAt=meta.updatedAt||githubAutoNow();await githubAutoWrite(config,token,merged,remote.sha,updatedAt);db=merged;
+      }else db=remote.data;
+    }
+    meta.lastSyncAt=githubAutoNow();meta.updatedAt=updatedAt||remote&&remote.updatedAt||meta.updatedAt;saveGithubAutoMeta(meta);
+    try{localStorage.setItem(KEY,JSON.stringify(db));}catch(e){}renderAll();if(!silent)toast('GitHub 同步完成');
+  }catch(e){if(!silent)toast('同步失败：'+(e&&e.message||'请检查令牌和私有仓库'));}
+  finally{githubAutoBusy=false;if(ui.tab==='mine')renderMine();}
+}
+function scheduleGithubAutoSync(){if(!githubAutoInfo().ready)return;clearTimeout(githubAutoTimer);githubAutoTimer=setTimeout(function(){githubAutoSync(true);},900);}
+function startGithubAutoSync(){if(!githubAutoInfo().ready)return;setTimeout(function(){githubAutoSync(true);},80);window.addEventListener('online',function(){githubAutoSync(true);});}
 
 /* ---------- Supabase cloud sync ---------- */
 var CLOUD_CONFIG_KEY='tennis-life-supabase-config-v1';
@@ -1014,7 +1094,7 @@ $('file').addEventListener('change',function(e){
     var d;try{d=JSON.parse(rd.result);}catch(err){toast('文件不是有效的备份');return;}
     if(!d||!Array.isArray(d.records)){toast('文件不是有效的备份');return;}
     confirmSheet('导入备份','备份里有 '+d.records.length+' 条记录。导入后会替换当前的 '+db.records.length+' 条记录和设置。','导入',false,function(){
-      db=norm(d);db.records.forEach(function(r){if(!r.id)r.id=uid();markCloudRecord(r.id);});save();renderAll();toast('已导入 '+db.records.length+' 条记录');});
+      db=norm(d);db.records.forEach(function(r){if(!r.id)r.id=uid();markGithubAutoRecord(r.id);});save();renderAll();toast('已导入 '+db.records.length+' 条记录');});
   };
   rd.readAsText(f);
 });
@@ -1028,7 +1108,7 @@ var ACT={
   edit:function(el){openEdit(el.dataset.id);},
   closeEdit:function(){closePage('p-edit');},
   saveEdit:saveEdit,
-  delEdit:function(){confirmSheet('删除记录','删除后不能恢复，确定吗？','删除',true,function(){markCloudDeleted(ed.id);db.records=db.records.filter(function(r){return r.id!==ed.id;});save({touchSettings:false});closePage('p-edit');renderAll();toast('已删除');});},
+  delEdit:function(){confirmSheet('删除记录','删除后不能恢复，确定吗？','删除',true,function(){markGithubAutoDeleted(ed.id);db.records=db.records.filter(function(r){return r.id!==ed.id;});save();closePage('p-edit');renderAll();toast('已删除');});},
   pickType:function(el){ed.type=el.dataset.v;edTypes();edCalc();},
   pickVenue:function(el){$('f-venue').value=el.dataset.v;},
   togPartner:function(el){var p=el.dataset.v,i=ed.partners.indexOf(p);if(i>=0)ed.partners.splice(i,1);else ed.partners.push(p);edPartners();},
@@ -1056,6 +1136,9 @@ var ACT={
   githubSetup:githubSetup,
   githubUpload:githubUpload,
   githubRestore:githubRestore,
+  githubAutoSetup:githubAutoSetup,
+  githubAutoNow:githubAutoNowSync,
+  githubAutoDisconnect:githubAutoDisconnect,
   cloudSetup:cloudSetup,
   cloudLogin:cloudLogin,
   cloudRegister:cloudRegister,
@@ -1064,17 +1147,17 @@ var ACT={
   export:exportJSON,
   csv:function(){if(!db.records.length){toast('还没有记录');return;}exportCSV();},
   import:function(){$('file').click();},
-  clear:function(){confirmSheet('清空所有数据','所有记录和设置都会删除且不能恢复。建议先导出备份。','清空',true,function(){db.records.forEach(function(r){markCloudDeleted(r.id);});db=norm({});save();renderAll();toast('已清空');});}
+  clear:function(){confirmSheet('清空所有数据','所有记录和设置都会删除且不能恢复。建议先导出备份。','清空',true,function(){db.records.forEach(function(r){markGithubAutoDeleted(r.id);});db=norm({});save();renderAll();toast('已清空');});}
 };
 document.addEventListener('click',function(e){var el=e.target.closest('[data-act]');if(!el)return;var f=ACT[el.dataset.act];if(f){e.preventDefault();f(el,e);}});
 document.addEventListener('keydown',function(e){if(e.key==='Enter'&&e.target.id==='f-newp'){e.preventDefault();ACT.addPartner();}});
 
 function renderAll(){renderHome();renderRecords();renderMine();if($('p-stats').classList.contains('on'))renderStats();}
 renderAll();
-startCloudSync();
+startGithubAutoSync();
 
 // first launch
-if(!db.records.length&&!db.settings.startDate&&!db.settings.baseline.count&&!cloudConfig()){
+if(!db.records.length&&!db.settings.startDate&&!db.settings.baseline.count&&!githubAutoConfig()){
   setTimeout(function(){
     formSheet('欢迎来到网球生活','先简单设置一下，之后都能在“我的”里改。以前打过的可以把总数补进来。',[
       {k:'name',l:'昵称',ph:'怎么称呼你'},{k:'d',l:'开始打球',t:'date'},
