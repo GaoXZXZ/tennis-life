@@ -291,7 +291,12 @@ function norm(d){
 function num(v,def){v=parseFloat(v);return isFinite(v)?v:def;}
 function load(){try{var raw=localStorage.getItem(KEY);if(raw)return norm(JSON.parse(raw));}catch(e){}return norm({});}
 var db=load();
-function save(){try{localStorage.setItem(KEY,JSON.stringify(db));}catch(e){toast('保存失败：浏览器存储不可用');}}
+function save(options){
+  options=options||{};
+  try{localStorage.setItem(KEY,JSON.stringify(db));}catch(e){toast('保存失败：浏览器存储不可用');}
+  if(options.touchSettings!==false)cloudTouchSettings();
+  if(!options.noCloud)scheduleCloudSync();
+}
 
 /* ---------- helpers ---------- */
 function pad(n){return (n<10?'0':'')+n;}
@@ -451,6 +456,7 @@ function renderMine(){
   var sd=startDate();var days=sd?Math.max(0,dayDiff(sd,today())+1):0;
   var nm=s.name||'网球人';
   var gh=githubSync();
+  var cloud=cloudInfo();
   var h='<div class="me"><div class="av">'+esc(nm.slice(0,1))+'</div><div><b>'+esc(nm)+'</b><small>网球第 '+days+' 天 · '+fmt(all.count+b.count,0)+' 场</small></div></div>';
   function row(act,t,v,cls){return '<button data-act="'+act+'"'+(cls?' class="'+cls+'"':'')+'><span>'+t+'</span><span>'+v+ico('right','#A9B3AB',14)+'</span></button>';}
   h+='<div class="mg"><div class="flabel">设置</div><div class="list">'+
@@ -463,6 +469,13 @@ function renderMine(){
   h+='<div class="mg"><div class="flabel">历史数据</div><div class="list">'+
     row('setBase','补录历史累计',b.count||b.hours||b.cost?('已补 '+fmt(b.count,0)+' 场'):'未补录')+
     '</div><div class="foot">用这个软件之前打过的总场次、时长、花费，会加到首页和数据页的“累计”里。</div></div>';
+  h+='<div class="mg"><div class="flabel">云同步</div><div class="list">'+
+    row('cloudSetup','连接云数据库',cloud.configured?'已配置':'未设置')+
+    row('cloudLogin','同步账号',cloud.signedIn?'已登录':'登录 / 注册')+
+    (cloud.configured&&!cloud.signedIn?row('cloudRegister','创建同步账号','首次使用'): '')+
+    row('cloudSyncNow','立即同步',cloud.syncing?'同步中…':(cloud.signedIn?'自动同步已开启':'需先登录'))+
+    (cloud.signedIn?row('cloudLogout','退出当前设备',''): '')+
+    '</div><div class="foot">登录后每次打开 App 会自动连接云端并同步。数据按账号隔离，其他账号无法读取。</div></div>';
   h+='<div class="mg"><div class="flabel">数据</div><div class="list">'+
     row('githubSetup','GitHub 私密备份',gh.repo?'已配置':'未设置')+
     row('githubUpload','上传加密备份',gh.repo?'现在上传':'先设置')+
@@ -633,9 +646,10 @@ function saveEdit(){
     partners:ed.partners.slice(),score:$('f-score').value.trim(),
     costs:{court:num($('f-court').value,0),coach:num($('f-coach').value,0),other:num($('f-other').value,0)},
     kcal:kc===''?null:num(kc,null),mood:ed.mood||0,note:$('f-note').value.trim()};
+  r.updatedAt=cloudNow();
   var i=-1;db.records.forEach(function(x,j){if(x.id===r.id)i=j;});
   if(i>=0)db.records[i]=r;else db.records.push(r);
-  save();closePage('p-edit');renderAll();toast(i>=0?'已更新':'已记下，又是更好的自己');
+  markCloudRecord(r.id);save({touchSettings:false});closePage('p-edit');renderAll();toast(i>=0?'已更新':'已记下，又是更好的自己');
 }
 
 /* ---------- pages / sheets ---------- */
@@ -784,9 +798,214 @@ async function restoreGithubBackup(sync,password){
     var res=await githubFetch(githubApiUrl(sync.repo),githubToken());
     var file=await res.json(),data=await decryptBackup(new TextDecoder().decode(unb64Bytes(file.content)),password);
     confirmSheet('确认恢复','备份里有 '+data.records.length+' 条记录。恢复后会替换本机的 '+db.records.length+' 条记录和设置。','恢复',false,function(){
-      db=norm(data);db.records.forEach(function(r){if(!r.id)r.id=uid();});save();renderAll();toast('已恢复 '+db.records.length+' 条记录');
+      db=norm(data);db.records.forEach(function(r){if(!r.id)r.id=uid();markCloudRecord(r.id);});save();renderAll();toast('已恢复 '+db.records.length+' 条记录');
     });
   }catch(e){toast('恢复失败：'+(e&&e.message||'请检查网络、仓库、令牌和密码'));}
+}
+
+/* ---------- Supabase cloud sync ---------- */
+var CLOUD_CONFIG_KEY='tennis-life-supabase-config-v1';
+var CLOUD_SESSION_KEY='tennis-life-supabase-session-v1';
+var CLOUD_META_KEY='tennis-life-supabase-meta-v1';
+var cloudSyncBusy=false,cloudSyncTimer=null,cloudSyncError='';
+function cloudNow(){return new Date().toISOString();}
+function cloudConfig(){
+  try{
+    var c=JSON.parse(localStorage.getItem(CLOUD_CONFIG_KEY)||'{}');
+    var url=normalizeCloudUrl(c.url);
+    return url&&c.key?{url:url,key:String(c.key).trim()}:null;
+  }catch(e){return null;}
+}
+function normalizeCloudUrl(value){
+  try{var u=new URL(String(value||'').trim());return u.protocol==='https:'?u.origin:'';}catch(e){return '';}
+}
+function cloudSession(){
+  try{
+    var s=JSON.parse(localStorage.getItem(CLOUD_SESSION_KEY)||'{}');
+    return s&&s.accessToken&&s.refreshToken&&s.userId?s:null;
+  }catch(e){return null;}
+}
+function saveCloudSession(data){
+  if(!data||!data.access_token||!data.refresh_token||!data.user||!data.user.id)throw new Error('云端未返回有效登录会话');
+  localStorage.setItem(CLOUD_SESSION_KEY,JSON.stringify({accessToken:data.access_token,refreshToken:data.refresh_token,userId:data.user.id,expiresAt:Date.now()+Math.max(60,(+data.expires_in||3600)-30)*1000}));
+}
+function cloudMeta(){
+  try{
+    var m=JSON.parse(localStorage.getItem(CLOUD_META_KEY)||'{}');
+    return {tombstones:m&&m.tombstones&&typeof m.tombstones==='object'?m.tombstones:{},settingsUpdatedAt:m&&m.settingsUpdatedAt||'',lastSyncAt:m&&m.lastSyncAt||''};
+  }catch(e){return {tombstones:{},settingsUpdatedAt:'',lastSyncAt:''};}
+}
+function saveCloudMeta(meta){try{localStorage.setItem(CLOUD_META_KEY,JSON.stringify(meta));}catch(e){}}
+function cloudTouchSettings(){var meta=cloudMeta();meta.settingsUpdatedAt=cloudNow();saveCloudMeta(meta);}
+function markCloudRecord(id){var meta=cloudMeta();delete meta.tombstones[id];saveCloudMeta(meta);}
+function markCloudDeleted(id){var meta=cloudMeta();meta.tombstones[id]=cloudNow();saveCloudMeta(meta);}
+function cloudInfo(){
+  var config=cloudConfig(),session=cloudSession(),meta=cloudMeta();
+  return {configured:!!config,signedIn:!!(config&&session),syncing:cloudSyncBusy,lastSyncAt:meta.lastSyncAt};
+}
+function cloudErrorMessage(body,status){
+  if(body&&typeof body==='object')return body.message||body.msg||body.error_description||body.error||('云端请求失败（'+status+'）');
+  return '云端请求失败（'+status+'）';
+}
+async function cloudHttp(url,options){
+  var response;
+  try{response=await fetch(url,options);}catch(e){throw new Error('无法连接云端，请检查网络或项目地址');}
+  if(!response.ok){
+    var body=null;try{body=await response.json();}catch(e){}
+    var error=new Error(cloudErrorMessage(body,response.status));error.status=response.status;throw error;
+  }
+  return response;
+}
+async function cloudAuth(path,body){
+  var config=cloudConfig();if(!config)throw new Error('请先设置云数据库');
+  var response=await cloudHttp(config.url+path,{method:'POST',headers:{'apikey':config.key,'Content-Type':'application/json'},body:JSON.stringify(body)});
+  return response.json();
+}
+async function ensureCloudSession(){
+  var session=cloudSession();
+  if(!session)return null;
+  if(session.expiresAt>Date.now()+90000)return session;
+  try{
+    var data=await cloudAuth('/auth/v1/token?grant_type=refresh_token',{refresh_token:session.refreshToken});
+    saveCloudSession(data);return cloudSession();
+  }catch(e){localStorage.removeItem(CLOUD_SESSION_KEY);cloudSyncError='登录已过期，请重新登录';return null;}
+}
+async function cloudApi(path,options){
+  var config=cloudConfig(),session=await ensureCloudSession();
+  if(!config)throw new Error('请先设置云数据库');
+  if(!session)throw new Error('请先登录云同步账号');
+  options=options||{};
+  options.headers=Object.assign({'apikey':config.key,'Authorization':'Bearer '+session.accessToken},options.headers||{});
+  return cloudHttp(config.url+path,options);
+}
+function cloudSetup(){
+  var config=cloudConfig();
+  formSheet('连接云数据库','填写 Supabase 的 Project URL 和 Publishable / anon key。不要填 service_role key。',[
+    {k:'url',l:'Project URL',v:config?config.url:'',ph:'https://xxxx.supabase.co'},
+    {k:'key',l:'Publishable key',v:config?config.key:'',ph:'sb_publishable_… 或 anon key'}
+  ],function(o){
+    var url=normalizeCloudUrl(o.url),key=o.key.trim();
+    if(!url){toast('请输入有效的 https Project URL');return false;}
+    if(!key){toast('请输入 Publishable / anon key');return false;}
+    localStorage.setItem(CLOUD_CONFIG_KEY,JSON.stringify({url:url,key:key}));
+    localStorage.removeItem(CLOUD_SESSION_KEY);cloudSyncError='';renderMine();toast('云数据库已保存，请登录同步账号');
+  });
+}
+function cloudLogin(){
+  if(!cloudConfig()){cloudSetup();return;}
+  formSheet('登录云同步','登录一次后，之后打开 App 会自动连接和同步。',[
+    {k:'email',l:'邮箱',t:'email',ph:'name@example.com'},
+    {k:'password',l:'密码',t:'password',ph:'至少 8 位'}
+  ],function(o){
+    if(!o.email||!o.password){toast('请输入邮箱和密码');return false;}
+    cloudLoginWithPassword(o.email,o.password);
+  });
+}
+async function cloudLoginWithPassword(email,password){
+  try{
+    var data=await cloudAuth('/auth/v1/token?grant_type=password',{email:email,password:password});
+    saveCloudSession(data);cloudSyncError='';renderMine();toast('已登录，正在同步…');await syncCloud(true);
+  }catch(e){toast('登录失败：'+(e&&e.message||'请检查邮箱和密码'));}
+}
+function cloudRegister(){
+  if(!cloudConfig()){cloudSetup();return;}
+  formSheet('创建同步账号','首次使用可创建一个账号。若项目启用邮箱验证，请完成验证后再登录。',[
+    {k:'email',l:'邮箱',t:'email',ph:'name@example.com'},
+    {k:'password',l:'密码',t:'password',ph:'至少 8 位'}
+  ],function(o){
+    if(!o.email||o.password.length<8){toast('请输入邮箱和至少 8 位密码');return false;}
+    cloudRegisterAccount(o.email,o.password);
+  });
+}
+async function cloudRegisterAccount(email,password){
+  try{
+    var data=await cloudAuth('/auth/v1/signup',{email:email,password:password});
+    if(data&&data.access_token){saveCloudSession(data);cloudSyncError='';renderMine();toast('账号已创建，正在同步…');await syncCloud(true);}
+    else toast('账号已创建，请到邮箱完成验证后再登录');
+  }catch(e){toast('注册失败：'+(e&&e.message||'请稍后重试'));}
+}
+function cloudLogout(){localStorage.removeItem(CLOUD_SESSION_KEY);cloudSyncError='';renderMine();toast('已退出当前设备的云同步');}
+function cloudSyncNow(){
+  if(!cloudConfig()){cloudSetup();return;}
+  if(!cloudSession()){cloudLogin();return;}
+  syncCloud(false);
+}
+function cloudIsNewer(a,b){var aa=Date.parse(a||0),bb=Date.parse(b||0);return isFinite(aa)&&(!isFinite(bb)||aa>bb);}
+function cloudRecordIndex(id){for(var i=0;i<db.records.length;i++)if(db.records[i].id===id)return i;return -1;}
+function cloudApplyRemoteRecord(row,meta){
+  var index=cloudRecordIndex(row.record_id);
+  if(row.deleted_at){if(index>=0)db.records.splice(index,1);meta.tombstones[row.record_id]=row.updated_at;return;}
+  if(!row.data||typeof row.data!=='object')return;
+  var remote=norm({records:[row.data]}).records[0];if(!remote)return;
+  remote.id=row.record_id;remote.updatedAt=row.updated_at;
+  if(index>=0)db.records[index]=remote;else db.records.push(remote);
+  delete meta.tombstones[row.record_id];
+}
+function cloudApplyWrittenRows(rows,meta){
+  (rows||[]).forEach(function(row){
+    var index=cloudRecordIndex(row.record_id);
+    if(row.deleted_at){if(index>=0)db.records.splice(index,1);meta.tombstones[row.record_id]=row.updated_at;}
+    else if(index>=0){db.records[index].updatedAt=row.updated_at;delete meta.tombstones[row.record_id];}
+  });
+}
+async function cloudPull(){
+  var rec=await cloudApi('/rest/v1/tennis_records?select=record_id,data,updated_at,deleted_at&order=updated_at.asc');
+  var set=await cloudApi('/rest/v1/tennis_settings?select=data,updated_at&limit=1');
+  return {records:await rec.json(),settings:await set.json()};
+}
+async function cloudWriteRecords(rows){
+  if(!rows.length)return [];
+  var response=await cloudApi('/rest/v1/tennis_records?on_conflict=user_id%2Crecord_id',{method:'POST',headers:{'Content-Type':'application/json','Prefer':'resolution=merge-duplicates,return=representation'},body:JSON.stringify(rows)});
+  return response.json();
+}
+async function cloudWriteSettings(row){
+  var response=await cloudApi('/rest/v1/tennis_settings?on_conflict=user_id',{method:'POST',headers:{'Content-Type':'application/json','Prefer':'resolution=merge-duplicates,return=representation'},body:JSON.stringify(row)});
+  return response.json();
+}
+async function syncCloud(silent){
+  if(cloudSyncBusy)return;
+  var session=await ensureCloudSession();
+  if(!session){if(!silent)toast('请先登录云同步账号');return;}
+  if(navigator.onLine===false){if(!silent)toast('当前离线，稍后会自动同步');return;}
+  cloudSyncBusy=true;if(ui.tab==='mine')renderMine();
+  try{
+    var remote=await cloudPull(),meta=cloudMeta(),remoteById={};
+    (remote.records||[]).forEach(function(row){remoteById[row.record_id]=row;});
+    (remote.records||[]).forEach(function(row){
+      var index=cloudRecordIndex(row.record_id),localAt=meta.tombstones[row.record_id]||(index>=0&&db.records[index].updatedAt)||'';
+      if(cloudIsNewer(row.updated_at,localAt))cloudApplyRemoteRecord(row,meta);
+    });
+    var remoteSettings=(remote.settings||[])[0],pushSettings=!remoteSettings;
+    if(remoteSettings&&cloudIsNewer(remoteSettings.updated_at,meta.settingsUpdatedAt)){
+      db.settings=norm({settings:remoteSettings.data||{}}).settings;meta.settingsUpdatedAt=remoteSettings.updated_at;
+    }else if(remoteSettings||meta.settingsUpdatedAt)pushSettings=true;
+    var pending=[];
+    db.records.forEach(function(record){
+      var server=remoteById[record.id];
+      if(!server||cloudIsNewer(record.updatedAt,server.updated_at))pending.push({user_id:session.userId,record_id:record.id,data:record,deleted_at:null});
+    });
+    Object.keys(meta.tombstones).forEach(function(id){
+      var server=remoteById[id];
+      if(!server||cloudIsNewer(meta.tombstones[id],server.updated_at))pending.push({user_id:session.userId,record_id:id,data:null,deleted_at:meta.tombstones[id]});
+    });
+    var written=await cloudWriteRecords(pending);cloudApplyWrittenRows(written,meta);
+    if(pushSettings){
+      var settingsRows=await cloudWriteSettings({user_id:session.userId,data:db.settings});
+      if(settingsRows[0]&&settingsRows[0].updated_at)meta.settingsUpdatedAt=settingsRows[0].updated_at;
+    }
+    meta.lastSyncAt=cloudNow();saveCloudMeta(meta);save({touchSettings:false,noCloud:true});cloudSyncError='';renderAll();
+    if(!silent)toast('云端同步完成');
+  }catch(e){cloudSyncError=e&&e.message||'同步失败';if(!silent)toast('同步失败：'+cloudSyncError);}
+  finally{cloudSyncBusy=false;if(ui.tab==='mine')renderMine();}
+}
+function scheduleCloudSync(){
+  if(!cloudConfig()||!cloudSession())return;
+  clearTimeout(cloudSyncTimer);cloudSyncTimer=setTimeout(function(){syncCloud(true);},900);
+}
+function startCloudSync(){
+  if(!cloudConfig())return;
+  setTimeout(function(){syncCloud(true);},80);
+  window.addEventListener('online',function(){syncCloud(true);});
 }
 $('file').addEventListener('change',function(e){
   var f=e.target.files[0];e.target.value='';if(!f)return;
@@ -795,7 +1014,7 @@ $('file').addEventListener('change',function(e){
     var d;try{d=JSON.parse(rd.result);}catch(err){toast('文件不是有效的备份');return;}
     if(!d||!Array.isArray(d.records)){toast('文件不是有效的备份');return;}
     confirmSheet('导入备份','备份里有 '+d.records.length+' 条记录。导入后会替换当前的 '+db.records.length+' 条记录和设置。','导入',false,function(){
-      db=norm(d);db.records.forEach(function(r){if(!r.id)r.id=uid();});save();renderAll();toast('已导入 '+db.records.length+' 条记录');});
+      db=norm(d);db.records.forEach(function(r){if(!r.id)r.id=uid();markCloudRecord(r.id);});save();renderAll();toast('已导入 '+db.records.length+' 条记录');});
   };
   rd.readAsText(f);
 });
@@ -809,7 +1028,7 @@ var ACT={
   edit:function(el){openEdit(el.dataset.id);},
   closeEdit:function(){closePage('p-edit');},
   saveEdit:saveEdit,
-  delEdit:function(){confirmSheet('删除记录','删除后不能恢复，确定吗？','删除',true,function(){db.records=db.records.filter(function(r){return r.id!==ed.id;});save();closePage('p-edit');renderAll();toast('已删除');});},
+  delEdit:function(){confirmSheet('删除记录','删除后不能恢复，确定吗？','删除',true,function(){markCloudDeleted(ed.id);db.records=db.records.filter(function(r){return r.id!==ed.id;});save({touchSettings:false});closePage('p-edit');renderAll();toast('已删除');});},
   pickType:function(el){ed.type=el.dataset.v;edTypes();edCalc();},
   pickVenue:function(el){$('f-venue').value=el.dataset.v;},
   togPartner:function(el){var p=el.dataset.v,i=ed.partners.indexOf(p);if(i>=0)ed.partners.splice(i,1);else ed.partners.push(p);edPartners();},
@@ -837,19 +1056,25 @@ var ACT={
   githubSetup:githubSetup,
   githubUpload:githubUpload,
   githubRestore:githubRestore,
+  cloudSetup:cloudSetup,
+  cloudLogin:cloudLogin,
+  cloudRegister:cloudRegister,
+  cloudSyncNow:cloudSyncNow,
+  cloudLogout:cloudLogout,
   export:exportJSON,
   csv:function(){if(!db.records.length){toast('还没有记录');return;}exportCSV();},
   import:function(){$('file').click();},
-  clear:function(){confirmSheet('清空所有数据','所有记录和设置都会删除且不能恢复。建议先导出备份。','清空',true,function(){db=norm({});save();renderAll();toast('已清空');});}
+  clear:function(){confirmSheet('清空所有数据','所有记录和设置都会删除且不能恢复。建议先导出备份。','清空',true,function(){db.records.forEach(function(r){markCloudDeleted(r.id);});db=norm({});save();renderAll();toast('已清空');});}
 };
 document.addEventListener('click',function(e){var el=e.target.closest('[data-act]');if(!el)return;var f=ACT[el.dataset.act];if(f){e.preventDefault();f(el,e);}});
 document.addEventListener('keydown',function(e){if(e.key==='Enter'&&e.target.id==='f-newp'){e.preventDefault();ACT.addPartner();}});
 
 function renderAll(){renderHome();renderRecords();renderMine();if($('p-stats').classList.contains('on'))renderStats();}
 renderAll();
+startCloudSync();
 
 // first launch
-if(!db.records.length&&!db.settings.startDate&&!db.settings.baseline.count){
+if(!db.records.length&&!db.settings.startDate&&!db.settings.baseline.count&&!cloudConfig()){
   setTimeout(function(){
     formSheet('欢迎来到网球生活','先简单设置一下，之后都能在“我的”里改。以前打过的可以把总数补进来。',[
       {k:'name',l:'昵称',ph:'怎么称呼你'},{k:'d',l:'开始打球',t:'date'},
